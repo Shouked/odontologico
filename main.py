@@ -50,7 +50,7 @@ agendamentos = Table(
     Column("paciente_id", UUID(as_uuid=True), nullable=False), # Foreign key logic managed by the app
     Column("data_hora", DateTime(timezone=True), nullable=False),
     Column("procedimento", String(255), nullable=False),
-    Column("status", String(50), nullable=False, default='Agendado'), # e.g., Agendado, Realizado, Cancelado
+    Column("status", String(50), nullable=False, default='Agendado'),
 )
 
 historico_conversas = Table(
@@ -99,8 +99,7 @@ async def consultar_horarios_disponiveis(dia: str) -> str:
     if not horarios_disponiveis:
         return f"Não temos horários disponíveis para o dia {data_consulta.strftime('%d/%m/%Y')}. Por favor, escolha outra data."
     
-    return f"Horários disponíveis para {data_consulta.strftime('%d/%m/%Y')}: {', '.join(horarios_disponiveis)}."
-
+    return f"Estes são os horários disponíveis para {data_consulta.strftime('%d/%m/%Y')}: {', '.join(horarios_disponiveis)}. Qual você prefere?"
 
 async def agendar_consulta(telefone: str, data_hora_str: str, procedimento: str) -> str:
     paciente_query = pacientes.select().where(pacientes.c.telefone == telefone)
@@ -109,7 +108,7 @@ async def agendar_consulta(telefone: str, data_hora_str: str, procedimento: str)
         return "Paciente não encontrado. Por favor, cadastre-se antes de agendar."
 
     try:
-        data_hora = datetime.fromisoformat(data_hora_str)
+        data_hora = datetime.fromisoformat(data_hora_str).astimezone(timezone.utc)
     except ValueError:
         return "Formato de data e hora inválido. Use AAAA-MM-DDTHH:MM:SS."
 
@@ -122,7 +121,7 @@ async def agendar_consulta(telefone: str, data_hora_str: str, procedimento: str)
     }
     query = agendamentos.insert().values(**novo_agendamento)
     await database.execute(query)
-    return f"Agendamento confirmado para {procedimento} no dia {data_hora.strftime('%d/%m/%Y às %H:%M')}. Aguardamos você!"
+    return f"Perfeito! Seu agendamento para {procedimento} no dia {data_hora.strftime('%d/%m/%Y às %H:%M')} foi confirmado. Aguardamos você!"
 
 async def cadastrar_paciente(telefone: str, nome: str, data_nascimento_str: Optional[str]) -> str:
     existente = await database.fetch_one(pacientes.select().where(pacientes.c.telefone == telefone))
@@ -132,11 +131,9 @@ async def cadastrar_paciente(telefone: str, nome: str, data_nascimento_str: Opti
     data_nascimento = None
     if data_nascimento_str:
         try:
-            # **CORREÇÃO**: Tenta primeiro o formato brasileiro (DD/MM/YYYY)
             data_nascimento = datetime.strptime(data_nascimento_str, "%d/%m/%Y").date()
         except ValueError:
             try:
-                # Se falhar, tenta o formato ISO (YYYY-MM-DD)
                 data_nascimento = datetime.strptime(data_nascimento_str, "%Y-%m-%d").date()
             except ValueError:
                 return "Formato de data de nascimento inválido. Por favor, peça ao usuário para fornecer no formato DD/MM/AAAA."
@@ -149,11 +146,11 @@ async def cadastrar_paciente(telefone: str, nome: str, data_nascimento_str: Opti
     }
     query = pacientes.insert().values(**novo_paciente)
     await database.execute(query)
-    return f"Cadastro de {nome} realizado com sucesso! Agora já podemos agendar sua consulta."
+    return f"Ótimo, {nome.split(' ')[0]}! Seu cadastro foi realizado com sucesso. Agora já podemos agendar sua consulta. Qual procedimento você gostaria de fazer?"
 
 # --- Funções Auxiliares de IA e Mídia ---
 
-async def chamar_ia(messages: List[dict]) -> dict: # Sempre retornará dict
+async def chamar_ia(messages: List[dict]) -> dict:
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
@@ -163,7 +160,7 @@ async def chamar_ia(messages: List[dict]) -> dict: # Sempre retornará dict
     body = {
         "model": "openai/gpt-4o",
         "messages": messages,
-        "response_format": {"type": "json_object"} # Força a saída em JSON
+        "response_format": {"type": "json_object"}
     }
     
     try:
@@ -178,12 +175,25 @@ async def chamar_ia(messages: List[dict]) -> dict: # Sempre retornará dict
         return {"action": "responder", "data": {"texto": "Desculpe, ocorreu um erro de comunicação com a IA. Tente novamente."}}
 
 async def transcrever_audio(audio_bytes: bytes) -> str | None:
-    # Este bloco permanece o mesmo
-    return ""
+    try:
+        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        audio_file = ("audio.ogg", audio_bytes, "audio/ogg")
+        transcription = await client.audio.transcriptions.create(model="whisper-1", file=audio_file)
+        return transcription.text
+    except Exception as e:
+        print(f"Erro na transcrição: {e}")
+        return None
 
 async def baixar_audio_bytes(url: str) -> bytes | None:
-    # Este bloco permanece o mesmo
-    return b""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            zapi_headers = {"Client-Token": os.getenv("CLIENT_TOKEN")}
+            resposta = await client.get(url, headers=zapi_headers)
+            resposta.raise_for_status()
+            return resposta.content
+    except Exception as e:
+        print(f"Erro ao baixar áudio: {e}")
+        return None
 
 # --- Endpoints da API ---
 
@@ -233,7 +243,7 @@ Você DEVE responder usando um dos seguintes formatos JSON:
       "action": "cadastrar_paciente",
       "data": {
         "nome": "Nome Completo do Paciente",
-        "data_nascimento": "AAAA-MM-DD"
+        "data_nascimento": "DD/MM/AAAA"
       }
     }
     ```
@@ -269,6 +279,7 @@ Você DEVE responder usando um dos seguintes formatos JSON:
     action = resposta_ia.get("action")
     action_data = resposta_ia.get("data", {})
     
+    # **LÓGICA SIMPLIFICADA**: Executa a ação e retorna o resultado diretamente.
     if action == "responder":
         return {"reply": action_data.get("texto", "Ocorreu um erro ao gerar a resposta.")}
     
@@ -276,22 +287,21 @@ Você DEVE responder usando um dos seguintes formatos JSON:
         nome = action_data.get("nome")
         data_nasc_str = action_data.get("data_nascimento")
         if not nome:
-            resposta_ferramenta = "A IA tentou cadastrar sem um nome. Peça o nome ao usuário."
-        else:
-            resposta_ferramenta = await cadastrar_paciente(dados.telefone_usuario, nome, data_nasc_str)
+            return {"reply": "Por favor, me informe seu nome completo para continuarmos."}
+        resposta_ferramenta = await cadastrar_paciente(dados.telefone_usuario, nome, data_nasc_str)
+        return {"reply": resposta_ferramenta}
 
     elif action == "agendar_consulta":
         resposta_ferramenta = await agendar_consulta(dados.telefone_usuario, action_data.get("data_hora"), action_data.get("procedimento"))
+        return {"reply": resposta_ferramenta}
+
     elif action == "consultar_horarios_disponiveis":
         resposta_ferramenta = await consultar_horarios_disponiveis(action_data.get("dia"))
-    else:
-        resposta_ferramenta = "Ação desconhecida. Por favor, reformule seu pedido."
+        return {"reply": resposta_ferramenta}
     
-    messages.append({"role": "assistant", "content": json.dumps(resposta_ia)})
-    messages.append({"role": "tool", "content": resposta_ferramenta})
-
-    final_response_ia = await chamar_ia(messages)
-    return {"reply": final_response_ia.get("data", {}).get("texto", "Não consegui processar a resposta final.")}
+    else:
+        # Se a ação não for reconhecida, pede para reformular.
+        return {"reply": "Não entendi o que preciso fazer. Você pode me dizer de outra forma?"}
 
 
 @app.post("/whatsapp")
@@ -306,6 +316,7 @@ async def receber_mensagem_zapi(request: Request):
         raise HTTPException(status_code=400, detail="O campo 'phone' é obrigatório.")
 
     if payload.get("fromMe"):
+        # Lógica do modo manual...
         return {"status": "ok", "message": "Modo manual ativado."}
 
     texto_da_mensagem = payload.get("text", {}).get("message")
@@ -369,3 +380,4 @@ async def receber_mensagem_zapi(request: Request):
         print(f"!!! Erro no Webhook /whatsapp: {e} !!!")
 
     return {"status": "ok"}
+
