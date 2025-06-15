@@ -1,5 +1,5 @@
 # main.py  –  API Odonto-Sorriso
-
+# ------------------------------------------
 from fastapi import FastAPI, Request, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -7,12 +7,12 @@ from typing import Optional, List, Dict, Any
 from databases import Database
 from sqlalchemy import MetaData, Table, Column, String, Text, DateTime, Date, func
 from sqlalchemy.dialects.postgresql import UUID
-import uuid, json, httpx, os
-from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta, date
+from dotenv import load_dotenv
 from openai import AsyncOpenAI
+import uuid, json, httpx, os
 
-# ─────────────────── Configuração básica ─────────────────── #
+# ──────────────── Configuração básica ────────────────
 load_dotenv()
 
 app = FastAPI(title="API Consultório Odontológico")
@@ -32,9 +32,10 @@ if not DATABASE_URL:
 database = Database(DATABASE_URL)
 metadata = MetaData()
 
-# ─────────────────── Tabelas ─────────────────── #
+# ──────────────── Tabelas ────────────────
 pacientes = Table(
-    "pacientes", metadata,
+    "pacientes",
+    metadata,
     Column("id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
     Column("nome", String(255), nullable=False),
     Column("telefone", String(255), unique=True, nullable=False),
@@ -42,7 +43,8 @@ pacientes = Table(
 )
 
 agendamentos = Table(
-    "agendamentos", metadata,
+    "agendamentos",
+    metadata,
     Column("id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
     Column("paciente_id", UUID(as_uuid=True), nullable=False),
     Column("data_hora", DateTime(timezone=True), nullable=False),
@@ -51,14 +53,15 @@ agendamentos = Table(
 )
 
 historico_conversas = Table(
-    "historico_conversas", metadata,
+    "historico_conversas",
+    metadata,
     Column("telefone", String(255), primary_key=True),
     Column("historico", Text, nullable=False),
     Column("last_updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("snoozed_until", DateTime(timezone=True), nullable=True),
 )
 
-# ─────────────────── Eventos FastAPI ─────────────────── #
+# ──────────────── Eventos FastAPI ────────────────
 @app.on_event("startup")
 async def startup() -> None:
     await database.connect()
@@ -68,13 +71,13 @@ async def startup() -> None:
 async def shutdown() -> None:
     await database.disconnect()
 
-# ─────────────────── Modelos Pydantic ─────────────────── #
+# ──────────────── Modelos Pydantic ────────────────
 class MensagemChat(BaseModel):
     telefone_usuario: str
     mensagem: str
     historico: Optional[List[dict]] = None
 
-# ─────────────────── Ferramentas de Negócio ─────────────────── #
+# ──────────────── Ferramentas de Negócio ────────────────
 async def consultar_horarios_disponiveis(dia: str) -> str:
     try:
         data_cons = datetime.strptime(dia, "%Y-%m-%d").date()
@@ -120,12 +123,8 @@ async def agendar_consulta(telefone: str, data_hora_str: str, procedimento: str)
     return f"Agendamento confirmado para {data_hora:%d/%m/%Y às %H:%M} – {procedimento}."
 
 
-async def cadastrar_paciente(
-    telefone: str, nome: str, data_nasc_str: Optional[str]
-) -> str:
-    if await database.fetch_one(
-        pacientes.select().where(pacientes.c.telefone == telefone)
-    ):
+async def cadastrar_paciente(telefone: str, nome: str, data_nasc_str: Optional[str]) -> str:
+    if await database.fetch_one(pacientes.select().where(pacientes.c.telefone == telefone)):
         return "Você já possui cadastro."
 
     data_nasc = None
@@ -149,7 +148,7 @@ async def cadastrar_paciente(
     )
     return f"Cadastro realizado, {nome.split()[0]}! Como posso ajudar agora?"
 
-# ─────────────────── IA / Transcrição / Download ─────────────────── #
+# ──────────────── IA / Transcrição / Download ────────────────
 async def chamar_ia(msgs: List[dict]) -> Dict[str, Any]:
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
@@ -184,155 +183,149 @@ async def transcrever_audio(audio_bytes: bytes) -> Optional[str]:
 async def baixar_audio_bytes(url: str) -> Optional[bytes]:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                url, headers={"Client-Token": os.getenv("CLIENT_TOKEN")}
-            )
+            resp = await client.get(url, headers={"Client-Token": os.getenv("CLIENT_TOKEN")})
             resp.raise_for_status()
             return resp.content
     except Exception as e:
         print("Erro download áudio:", e)
         return None
 
-# ─────────────────── Prompt da Sofia ─────────────────── #
+# ──────────────── Prompt da Sofia ────────────────
 PROMPT_SOFIA = f"""
 ### Papel e Objetivo
-Você é **Sofia**, assistente virtual da clínica *Odonto-Sorriso*.
+Você é **Sofia**, assistente virtual da clínica *Odonto-Sorriso*.  
 Ajude pacientes a tirar dúvidas, cadastrar-se e agendar consultas.
 
 ### Informações da Clínica
 - Horário: Seg-Sex 09:00-18:00 (fechado 12-13h)
 - Procedimentos: Limpeza, Clareamento Dental, Restauração, Tratamento de Canal
-- Duração padrão: 1 h.
+- Duração padrão: 1 h  
 - Data atual: {date.today():%d/%m/%Y}
 
 ### Regras
 1. Use sempre o primeiro nome do paciente.
 2. Peça **uma** informação por vez.
-3. Use `consultar_horarios_disponiveis` para saber horários.
+3. Para disponibilidade use `consultar_horarios_disponiveis`.
 4. Antes de `agendar_consulta`, tenha procedimento+data+hora.
 5. Se paciente não existir, colete nome completo + data de nascimento e chame `cadastrar_paciente`.
 
-### Ferramentas (responda em JSON)
-```json
+### Formatos JSON válidos
 {{"action":"responder","data":{{"texto":"..."}}}}
 {{"action":"cadastrar_paciente","data":{{"nome":"Nome","data_nascimento":"DD/MM/AAAA"}}}}
 {{"action":"consultar_horarios_disponiveis","data":{{"dia":"AAAA-MM-DD"}}}}
 {{"action":"agendar_consulta","data":{{"procedimento":"...","data_hora":"AAAA-MM-DDTHH:MM:SS"}}}}
 """
 
+# ──────────────── Endpoints ────────────────
 @app.get("/")
 async def root() -> Dict[str, str]:
-return {"message": "API Odonto-Sorriso viva!"}
+    return {"message": "API Odonto-Sorriso viva!"}
+
 
 @app.head("/")
 async def head_root() -> Response:
-return Response(status_code=200)
+    return Response(status_code=200)
+
 
 @app.post("/chat")
 async def chat(dados: MensagemChat) -> Dict[str, str]:
-mensagens = [{"role": "system", "content": PROMPT_SOFIA}]
-mensagens += dados.historico or []
-mensagens.append({"role": "user", "content": dados.mensagem})
+    mensagens = [{"role": "system", "content": PROMPT_SOFIA}]
+    mensagens += dados.historico or []
+    mensagens.append({"role": "user", "content": dados.mensagem})
 
-ia = await chamar_ia(mensagens)
-action, data = ia.get("action"), ia.get("data", {})
+    ia = await chamar_ia(mensagens)
+    action = ia.get("action")
+    data = ia.get("data", {})
 
-if action == "responder":
-    return {"reply": data.get("texto", "")}
+    if action == "responder":
+        return {"reply": data.get("texto", "")}
 
-if action == "cadastrar_paciente":
-    return {
-        "reply": await cadastrar_paciente(
+    if action == "cadastrar_paciente":
+        return {"reply": await cadastrar_paciente(
             dados.telefone_usuario, data.get("nome"), data.get("data_nascimento")
-        )
-    }
+        )}
 
-if action == "consultar_horarios_disponiveis":
-    return {"reply": await consultar_horarios_disponiveis(data.get("dia", ""))}
+    if action == "consultar_horarios_disponiveis":
+        return {"reply": await consultar_horarios_disponiveis(data.get("dia", ""))}
 
-if action == "agendar_consulta":
-    return {
-        "reply": await agendar_consulta(
-            dados.telefone_usuario,
-            data.get("data_hora", ""),
-            data.get("procedimento", ""),
-        )
-    }
+    if action == "agendar_consulta":
+        return {"reply": await agendar_consulta(
+            dados.telefone_usuario, data.get("data_hora", ""), data.get("procedimento", "")
+        )}
 
-return {"reply": "Desculpe, não entendi. Pode reformular?"}
+    return {"reply": "Desculpe, não entendi. Pode reformular?"}
+
 
 @app.post("/whatsapp")
 async def whatsapp_webhook(request: Request) -> Dict[str, str]:
-try:
-payload = await request.json()
-except Exception:
-raise HTTPException(status_code=400, detail="JSON inválido.")
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON inválido.")
 
-telefone = payload.get("phone")
-if not telefone:
-    raise HTTPException(status_code=400, detail="Campo phone ausente.")
+    telefone = payload.get("phone")
+    if not telefone:
+        raise HTTPException(status_code=400, detail="Campo phone ausente.")
 
-if payload.get("fromMe"):
-    return {"status": "ok", "msg": "modo manual"}
+    if payload.get("fromMe"):
+        return {"status": "ok", "msg": "modo manual"}
 
-texto = payload.get("text", {}).get("message")
-audio_url = payload.get("audio", {}).get("audioUrl")
-conteudo = texto or ""
-if audio_url:
-    bytes_audio = await baixar_audio_bytes(audio_url)
-    conteudo = (
-        await transcrever_audio(bytes_audio) if bytes_audio else "[Falha no áudio]"
+    texto = payload.get("text", {}).get("message")
+    audio_url = payload.get("audio", {}).get("audioUrl")
+    conteudo = texto or ""
+    if audio_url:
+        audio_bytes = await baixar_audio_bytes(audio_url)
+        conteudo = await transcrever_audio(audio_bytes) if audio_bytes else "[Erro no áudio]"
+
+    if not conteudo:
+        return {"status": "ok", "msg": "sem conteúdo"}
+
+    # ─── Recuperar histórico ───
+    row = await database.fetch_one(
+        historico_conversas.select().where(historico_conversas.c.telefone == telefone)
+    )
+    historico = (
+        json.loads(row["historico"])
+        if row and datetime.now(timezone.utc) - row["last_updated_at"] < timedelta(hours=24)
+        else []
     )
 
-if not conteudo:
-    return {"status": "ok", "msg": "sem conteúdo"}
-
-row = await database.fetch_one(
-    historico_conversas.select().where(historico_conversas.c.telefone == telefone)
-)
-hist = (
-    json.loads(row["historico"])
-    if row and datetime.now(timezone.utc) - row["last_updated_at"] < timedelta(hours=24)
-    else []
-)
-
-async with httpx.AsyncClient() as client:
-    public = os.getenv("PUBLIC_URL", "").rstrip("/")
-    resp = await client.post(
-        f"{public}/chat",
-        json={
-            "telefone_usuario": telefone,
-            "mensagem": conteudo,
-            "historico": hist,
-        },
-        timeout=120,
-    )
-    reply = resp.json().get("reply", "Falha no bot.")
-
-    novo_hist = hist + [
-        {"role": "user", "content": conteudo},
-        {"role": "assistant", "content": reply},
-    ]
-    hist_json = json.dumps(novo_hist[-20:])
-
-    if row:
-        await database.execute(
-            historico_conversas.update()
-            .where(historico_conversas.c.telefone == telefone)
-            .values(historico=hist_json, last_updated_at=func.now())
+    # ─── Chama /chat internamente ───
+    async with httpx.AsyncClient() as client:
+        public = os.getenv("PUBLIC_URL", "").rstrip("/")
+        resp = await client.post(
+            f"{public}/chat",
+            json={
+                "telefone_usuario": telefone,
+                "mensagem": conteudo,
+                "historico": historico,
+            },
+            timeout=120,
         )
-    else:
-        await database.execute(
-            historico_conversas.insert().values(
-                telefone=telefone, historico=hist_json, last_updated_at=func.now()
+        reply = resp.json().get("reply", "Falha no bot.")
+
+        historico.append({"role": "user", "content": conteudo})
+        historico.append({"role": "assistant", "content": reply})
+        hist_json = json.dumps(historico[-20:])
+
+        if row:
+            await database.execute(
+                historico_conversas.update()
+                .where(historico_conversas.c.telefone == telefone)
+                .values(historico=hist_json, last_updated_at=func.now())
             )
+        else:
+            await database.execute(
+                historico_conversas.insert().values(
+                    telefone=telefone, historico=hist_json, last_updated_at=func.now()
+                )
+            )
+
+        await client.post(
+            f"https://api.z-api.io/instances/{os.getenv('INSTANCE_ID')}/token/{os.getenv('TOKEN')}/send-text",
+            headers={"Client-Token": os.getenv("CLIENT_TOKEN")},
+            json={"phone": telefone, "message": reply},
+            timeout=30,
         )
 
-    await client.post(
-        f"https://api.z-api.io/instances/{os.getenv('INSTANCE_ID')}/token/{os.getenv('TOKEN')}/send-text",
-        headers={"Client-Token": os.getenv("CLIENT_TOKEN")},
-        json={"phone": telefone, "message": reply},
-        timeout=30,
-    )
-
-return {"status": "ok"}
+    return {"status": "ok"}
