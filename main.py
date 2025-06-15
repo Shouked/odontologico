@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
 from openai import AsyncOpenAI
 
-# ─────────────────── Configuração básica ─────────────────── #
+# ───────────────────── Configuração básica ───────────────────── #
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -23,8 +23,8 @@ if not DATABASE_URL:
 
 SAO_PAULO_TZ = pytz.timezone("America/Sao_Paulo")
 
-# ─────────────────── Inicialização FastAPI ─────────────────── #
-app = FastAPI(title="API Consultório Odontológico Avançada")
+# ───────────────────── Inicialização FastAPI ──────────────────── #
+app = FastAPI(title="API Consultório Odonto-Sorriso")
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,7 +34,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─────────────────── Configuração do Banco ─────────────────── #
+# ───────────────────── Configuração do Banco ──────────────────── #
 database = Database(DATABASE_URL)
 metadata = MetaData()
 
@@ -60,10 +60,10 @@ historico_conversas = Table(
     Column("telefone", String(255), primary_key=True, index=True),
     Column("historico", Text, nullable=False),
     Column("last_updated_at", DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-    Column("snoozed_until", DateTime(timezone=True), nullable=True)
+    Column("snoozed_until", DateTime(timezone=True), nullable=True),
 )
 
-# ─────────────────── Ciclo de vida ─────────────────── #
+# ───────────────────── Ciclo de vida ──────────────────────────── #
 @app.on_event("startup")
 async def startup():
     await database.connect()
@@ -72,13 +72,13 @@ async def startup():
 async def shutdown():
     await database.disconnect()
 
-# ─────────────────── Modelos ─────────────────── #
+# ───────────────────── Modelos Pydantic ───────────────────────── #
 class ChatRequest(BaseModel):
     telefone_usuario: str
     mensagem: str
     historico: List[dict] = Field(default_factory=list)
 
-# ─────────────────── Funções de negócio ─────────────────── #
+# ───────────────────── Funções de negócio ─────────────────────── #
 async def consultar_paciente_por_telefone(telefone: str) -> str:
     paciente = await database.fetch_one(
         pacientes.select().where(pacientes.c.telefone == telefone)
@@ -108,9 +108,8 @@ async def cadastrar_paciente(telefone: str, nome: str, data_nascimento_str: Opti
             data_nascimento=data_nascimento,
         )
     )
-    primeiro_nome = nome.split()[0]
     return (
-        f"Ótimo, {primeiro_nome}! Seu cadastro foi realizado. "
+        f"Ótimo, {nome.split()[0]}! Seu cadastro foi realizado. "
         "Agora já podemos agendar sua consulta. Qual procedimento você gostaria?"
     )
 
@@ -119,20 +118,20 @@ async def consultar_horarios_disponiveis(dia_preferencial_str: Optional[str] = N
     data_inicial = hoje
     if dia_preferencial_str:
         try:
-            data_preferencial = datetime.strptime(dia_preferencial_str, "%Y-%m-%d").date()
+            data_pref = datetime.strptime(dia_preferencial_str, "%Y-%m-%d").date()
         except ValueError:
             return "Formato de data inválido. Use AAAA-MM-DD."
-        if data_preferencial < hoje:
+        if data_pref < hoje:
             return f"Não é possível agendar em datas passadas. A data de hoje é {hoje.strftime('%d/%m/%Y')}."
-        data_inicial = data_preferencial
+        data_inicial = data_pref
 
     for i in range(30):
-        data_dia = data_inicial + timedelta(days=i)
-        if data_dia.weekday() >= 5:
-            continue  # pula fins de semana
+        dia = data_inicial + timedelta(days=i)
+        if dia.weekday() >= 5:
+            continue
         horarios_base = [f"{h:02d}:00" for h in range(9, 18) if h != 12]
-        inicio_utc = SAO_PAULO_TZ.localize(datetime.combine(data_dia, datetime.min.time())).astimezone(timezone.utc)
-        fim_utc = SAO_PAULO_TZ.localize(datetime.combine(data_dia, datetime.max.time())).astimezone(timezone.utc)
+        inicio_utc = SAO_PAULO_TZ.localize(datetime.combine(dia, datetime.min.time())).astimezone(timezone.utc)
+        fim_utc = SAO_PAULO_TZ.localize(datetime.combine(dia, datetime.max.time())).astimezone(timezone.utc)
 
         ocupados = await database.fetch_all(
             agendamentos.select().where(
@@ -141,12 +140,10 @@ async def consultar_horarios_disponiveis(dia_preferencial_str: Optional[str] = N
                 & (agendamentos.c.status != 'Cancelado')
             )
         )
-        horarios_ocupados = {
-            ag['data_hora'].astimezone(SAO_PAULO_TZ).strftime("%H:%M") for ag in ocupados
-        }
-        livres = [h for h in horarios_base if h not in horarios_ocupados]
+        ocup = {a['data_hora'].astimezone(SAO_PAULO_TZ).strftime("%H:%M") for a in ocupados}
+        livres = [h for h in horarios_base if h not in ocup]
         if livres:
-            return f"Encontrei horários para o dia {data_dia.strftime('%d/%m/%Y')}: {', '.join(livres)}."
+            return f"Encontrei horários para o dia {dia.strftime('%d/%m/%Y')}: {', '.join(livres)}."
     return "Não encontrei horários disponíveis nos próximos 30 dias."
 
 async def agendar_consulta(telefone: str, data_hora_str: str, procedimento: str) -> str:
@@ -171,9 +168,8 @@ async def agendar_consulta(telefone: str, data_hora_str: str, procedimento: str)
             status="Agendado",
         )
     )
-    primeiro_nome = paciente['nome'].split()[0]
     return (
-        f"Perfeito, {primeiro_nome}! Seu agendamento para {procedimento} "
+        f"Perfeito, {paciente['nome'].split()[0]}! Seu agendamento para {procedimento} "
         f"no dia {dt_local.strftime('%d/%m/%Y às %H:%M')} foi confirmado."
     )
 
@@ -196,17 +192,16 @@ async def consultar_meus_agendamentos_por_telefone(telefone: str) -> str:
         )
         .order_by(agendamentos.c.data_hora)
     )
-    primeiro_nome = paciente['nome'].split()[0]
     if not futuros:
-        return f"Olá, {primeiro_nome}! Verifiquei aqui e você não possui agendamentos futuros conosco."
+        return f"Olá, {paciente['nome'].split()[0]}! Verifiquei aqui e você não possui agendamentos futuros conosco."
 
     linhas = []
     for ag in futuros:
         dt_local = ag['data_hora'].astimezone(SAO_PAULO_TZ)
         linhas.append(f"- {ag['procedimento']} no dia {dt_local.strftime('%d/%m/%Y às %H:%M')}")
-    return f"Olá, {primeiro_nome}! Encontrei os seguintes agendamentos no seu nome:\n" + "\n".join(linhas)
+    return f"Olá, {paciente['nome'].split()[0]}! Encontrei os seguintes agendamentos no seu nome:\n" + "\n".join(linhas)
 
-# ─────────────────── Funções auxiliares de IA ─────────────────── #
+# ───────────────────── Funções auxiliares ─────────────────────── #
 async def chamar_ia(messages: List[dict]) -> dict:
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
@@ -222,8 +217,7 @@ async def chamar_ia(messages: List[dict]) -> dict:
         async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post(url, headers=headers, json=body)
             r.raise_for_status()
-            content_str = r.json()["choices"][0]["message"]["content"]
-            return json.loads(content_str)
+            return json.loads(r.json()["choices"][0]["message"]["content"])
     except (httpx.HTTPStatusError, json.JSONDecodeError, KeyError) as e:
         print(f"Erro na IA: {e}")
         return {"action": "responder", "data": {"texto": "Desculpe, estou com dificuldades técnicas. Tente novamente em instantes."}}
@@ -248,7 +242,7 @@ async def baixar_audio_bytes(url: str) -> bytes | None:
         print(f"Erro ao baixar áudio: {e}")
         return None
 
-# ─────────────────── Prompt base (sem f-string) ─────────────────── #
+# ───────────────────── Prompt base (sem f-string) ─────────────── #
 PROMPT_BASE = """
 ### Papel e Objetivo
 Você é a Sofia, a recepcionista virtual da clínica "Odonto-Sorriso". Sua missão é ser proativa, eficiente e humana.
@@ -272,19 +266,17 @@ A data de hoje é __DATA_ATUAL__. O fuso horário de referência é 'America/Sao
 - consultar_meus_agendamentos: {{"action": "consultar_meus_agendamentos", "data": {{}}}}
 """
 
-# ─────────────────── Lógica de chat ─────────────────── #
+# ───────────────────── Lógica de Chat ─────────────────────────── #
 async def processar_chat_logic(dados: ChatRequest) -> str:
     prompt_sistema = PROMPT_BASE.replace(
         "__DATA_ATUAL__", datetime.now(SAO_PAULO_TZ).date().isoformat()
     )
-
-    messages = [
+    mensagens = [
         {"role": "system", "content": prompt_sistema},
         *dados.historico,
         {"role": "user", "content": dados.mensagem},
     ]
-
-    resposta_ia = await chamar_ia(messages)
+    resposta_ia = await chamar_ia(mensagens)
     action = resposta_ia.get("action")
     data = resposta_ia.get("data", {})
     try:
@@ -304,7 +296,7 @@ async def processar_chat_logic(dados: ChatRequest) -> str:
         print(f"Erro na ação '{action}': {e}")
         return "Ocorreu um erro interno ao processar sua solicitação."
 
-# ─────────────────── Endpoints ─────────────────── #
+# ───────────────────── Endpoints ──────────────────────────────── #
 @app.get("/")
 async def root():
     return {"message": "API do Consultório Odonto-Sorriso no ar!"}
@@ -324,50 +316,49 @@ async def receber_mensagem_zapi(request: Request):
     if not numero:
         return Response(status_code=200)
 
-    # Ignora mensagens enviadas por nós mesmos
+    # Mensagens enviadas por nós mesmos: entra em snooze
     if payload.get("fromMe"):
         snooze = datetime.now(timezone.utc) + timedelta(minutes=30)
         await database.execute(
             """
             INSERT INTO historico_conversas (telefone, historico, snoozed_until)
             VALUES (:tel, '[]', :snooze)
-            ON CONFLICT (telefone) DO UPDATE SET snoozed_until = :snooze;
+            ON CONFLICT (telefone)
+            DO UPDATE SET snoozed_until = :snooze;
             """,
             {"tel": numero, "snooze": snooze},
         )
         return Response(status_code=200)
 
-    # Texto ou áudio
+    # Extrai conteúdo (texto ou áudio)
     conteudo = None
     if payload.get("text", {}).get("message"):
         conteudo = payload["text"]["message"]
     elif payload.get("audio", {}).get("audioUrl"):
         audio_bytes = await baixar_audio_bytes(payload["audio"]["audioUrl"])
         conteudo = await transcrever_audio(audio_bytes) if audio_bytes else None
-
     if not conteudo:
         return Response(status_code=200)
 
     try:
+        # Recupera histórico
         registro = await database.fetch_one(
             historico_conversas.select().where(historico_conversas.c.telefone == numero)
         )
         historico = []
         if registro:
-            # Se estiver em snooze, sai
             if registro["snoozed_until"] and registro["snoozed_until"] > datetime.now(timezone.utc):
                 return Response(status_code=200)
-            # Se o histórico tem menos de 6h, reaproveita
             if datetime.now(timezone.utc) - registro["last_updated_at"] < timedelta(hours=6):
                 historico = json.loads(registro["historico"])
 
-        # Primeira mensagem → adiciona status paciente
-        mensagem_para_ia = conteudo
+        # Primeira interação → insere status paciente
+        msg_ia = conteudo
         if not historico:
             status = await consultar_paciente_por_telefone(numero)
-            mensagem_para_ia = f"Status do paciente: {status}. Mensagem: {conteudo}"
+            msg_ia = f"Status do paciente: {status}. Mensagem: {conteudo}"
 
-        dados_chat = ChatRequest(telefone_usuario=numero, mensagem=mensagem_para_ia, historico=historico)
+        dados_chat = ChatRequest(telefone_usuario=numero, mensagem=msg_ia, historico=historico)
         resposta = await processar_chat_logic(dados_chat)
 
         historico += [
@@ -380,24 +371,32 @@ async def receber_mensagem_zapi(request: Request):
             """
             INSERT INTO historico_conversas (telefone, historico, snoozed_until, last_updated_at)
             VALUES (:tel, :hist, NULL, NOW())
-            ON CONFLICT (telefone) DO UPDATE
-              SET historico = :hist, snoozed_until = NULL, last_updated_at = NOW();
+            ON CONFLICT (telefone)
+            DO UPDATE SET historico = :hist,
+                          snoozed_until = NULL,
+                          last_updated_at = NOW();
             """,
             {"tel": numero, "hist": hist_str},
         )
 
-        # ───── Envia para WhatsApp (Z-API) ─────
+        # ───── Envia para WhatsApp (Z-API) em ASCII-safe ───── #
         instance_id = os.getenv("INSTANCE_ID")
-        token = os.getenv("TOKEN")
-        client_token = os.getenv("CLIENT_TOKEN")
-        if instance_id and token and client_token:
+        token       = os.getenv("TOKEN")
+        client_tok  = os.getenv("CLIENT_TOKEN")
+        if instance_id and token and client_tok:
             zapi_url = f"https://api.z-api.io/instances/{instance_id}/token/{token}/send-text"
+
+            payload_zapi = {"phone": numero, "message": resposta}
+
+            # Serializa garantindo somente ASCII (\uXXXX)
+            payload_ascii = json.dumps(payload_zapi, ensure_ascii=True)
+
             async with httpx.AsyncClient(timeout=30) as client:
                 await client.post(
                     zapi_url,
-                    json={"phone": numero, "message": resposta},
+                    content=payload_ascii,  # str ASCII-safe
                     headers={
-                        "Client-Token": client_token,
+                        "Client-Token": client_tok,
                         "Content-Type": "application/json; charset=utf-8",
                     },
                 )
