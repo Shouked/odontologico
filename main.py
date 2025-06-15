@@ -79,22 +79,16 @@ class MensagemChat(BaseModel):
 
 # --- Funções de Negócio (Ferramentas da IA) ---
 
-# **NOVO**: Ferramenta para buscar paciente pelo telefone
 async def consultar_paciente_por_telefone(telefone: str) -> str:
     """Consulta se um paciente já existe no banco de dados usando o número de telefone."""
     query = pacientes.select().where(pacientes.c.telefone == telefone)
     paciente = await database.fetch_one(query)
     if paciente:
-        # Retorna o nome do paciente para a IA usar na conversa
         return f"Paciente encontrado: {paciente['nome']}."
     return "Paciente não cadastrado."
 
-# **ALTERADO**: Função agora busca o próximo dia útil com horários disponíveis
 async def consultar_horarios_disponiveis(dia_preferencial_str: Optional[str] = None) -> str:
-    """
-    Verifica os horários disponíveis. Se um dia for fornecido, verifica nesse dia.
-    Caso contrário, encontra o próximo dia útil com vagas a partir de hoje.
-    """
+    """Verifica os horários disponíveis, buscando o próximo dia útil com vagas."""
     data_inicial = date.today()
     if dia_preferencial_str:
         try:
@@ -104,13 +98,9 @@ async def consultar_horarios_disponiveis(dia_preferencial_str: Optional[str] = N
         except ValueError:
             return "Formato de data inválido. Use AAAA-MM-DD."
 
-    # Loop para encontrar o próximo dia com vagas
-    for i in range(30): # Procura nos próximos 30 dias
+    for i in range(30):
         data_consulta = data_inicial + timedelta(days=i)
-        
-        # Pula finais de semana
-        if data_consulta.weekday() >= 5: # 5 = Sábado, 6 = Domingo
-            continue
+        if data_consulta.weekday() >= 5: continue
 
         horarios_base = [f"{h:02d}:00" for h in range(9, 18) if h != 12]
         query = agendamentos.select().where(func.date(agendamentos.c.data_hora) == data_consulta)
@@ -121,29 +111,102 @@ async def consultar_horarios_disponiveis(dia_preferencial_str: Optional[str] = N
         if horarios_disponiveis:
             return f"Encontrei horários para o dia {data_consulta.strftime('%d/%m/%Y')}. Os horários disponíveis são: {', '.join(horarios_disponiveis)}."
     
-    return "Não encontrei horários disponíveis nos próximos 30 dias. Por favor, entre em contato com a clínica."
+    return "Não encontrei horários disponíveis nos próximos 30 dias."
 
 async def agendar_consulta(telefone: str, data_hora_str: str, procedimento: str) -> str:
-    # ... (código existente sem alterações)
-    return ""
+    """Agenda uma nova consulta para um paciente existente."""
+    paciente_query = pacientes.select().where(pacientes.c.telefone == telefone)
+    paciente = await database.fetch_one(paciente_query)
+    if not paciente:
+        return "Paciente não encontrado. Por favor, cadastre-se antes de agendar."
+
+    try:
+        data_hora = datetime.fromisoformat(data_hora_str).astimezone(timezone.utc)
+    except ValueError:
+        return "Formato de data e hora inválido. Use AAAA-MM-DDTHH:MM:SS."
+
+    novo_agendamento = {
+        "id": uuid.uuid4(),
+        "paciente_id": paciente["id"],
+        "data_hora": data_hora,
+        "procedimento": procedimento,
+        "status": "Agendado"
+    }
+    query = agendamentos.insert().values(**novo_agendamento)
+    await database.execute(query)
+    return f"Perfeito! Seu agendamento para {procedimento} no dia {data_hora.strftime('%d/%m/%Y às %H:%M')} foi confirmado. Aguardamos você!"
 
 async def cadastrar_paciente(telefone: str, nome: str, data_nascimento_str: Optional[str]) -> str:
-    # ... (código existente sem alterações)
-    return ""
+    """Cadastra um novo paciente no banco de dados."""
+    existente = await database.fetch_one(pacientes.select().where(pacientes.c.telefone == telefone))
+    if existente:
+        return "Você já possui um cadastro conosco."
+
+    data_nascimento = None
+    if data_nascimento_str:
+        try:
+            data_nascimento = datetime.strptime(data_nascimento_str, "%d/%m/%Y").date()
+        except ValueError:
+            try:
+                data_nascimento = datetime.strptime(data_nascimento_str, "%Y-%m-%d").date()
+            except ValueError:
+                return "Formato de data inválido. Peça para o usuário fornecer no formato DD/MM/AAAA."
+
+    novo_paciente = {
+        "id": uuid.uuid4(),
+        "nome": nome,
+        "telefone": telefone,
+        "data_nascimento": data_nascimento
+    }
+    query = pacientes.insert().values(**novo_paciente)
+    await database.execute(query)
+    return f"Ótimo, {nome.split(' ')[0]}! Seu cadastro foi realizado com sucesso. Agora já podemos agendar sua consulta. Qual procedimento você gostaria de fazer?"
 
 # --- Funções Auxiliares de IA e Mídia ---
 
 async def chamar_ia(messages: List[dict]) -> dict:
-    # ... (código existente sem alterações)
-    return {}
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+        "Content-Type": "application/json",
+        "Referer": os.getenv("PUBLIC_URL") or ""
+    }
+    body = {
+        "model": "openai/gpt-4o",
+        "messages": messages,
+        "response_format": {"type": "json_object"}
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(url, headers=headers, json=body)
+            response.raise_for_status()
+            data = response.json()
+            return json.loads(data["choices"][0]["message"]["content"])
+    except Exception as e:
+        print(f"Erro na IA: {e}")
+        return {"action": "responder", "data": {"texto": "Desculpe, ocorreu um erro de comunicação com a IA."}}
 
 async def transcrever_audio(audio_bytes: bytes) -> str | None:
-    # ... (código existente sem alterações)
-    return ""
+    try:
+        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        audio_file = ("audio.ogg", audio_bytes, "audio/ogg")
+        transcription = await client.audio.transcriptions.create(model="whisper-1", file=audio_file)
+        return transcription.text
+    except Exception as e:
+        print(f"Erro na transcrição: {e}")
+        return None
 
 async def baixar_audio_bytes(url: str) -> bytes | None:
-    # ... (código existente sem alterações)
-    return b""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            zapi_headers = {"Client-Token": os.getenv("CLIENT_TOKEN")}
+            resposta = await client.get(url, headers=zapi_headers)
+            resposta.raise_for_status()
+            return resposta.content
+    except Exception as e:
+        print(f"Erro ao baixar áudio: {e}")
+        return None
 
 # --- Endpoints da API ---
 
@@ -159,7 +222,6 @@ async def head_root():
 async def chat(dados: MensagemChat):
     historico = dados.historico or []
 
-    # **PROMPT COMPLETAMENTE REESCRITO**
     prompt_sistema = """
 ### Papel e Objetivo
 Você é a Sofia, a assistente virtual da clínica "Odonto-Sorriso". Sua missão é ser uma recepcionista eficiente, guiando o paciente de forma lógica e natural. A data de hoje é {current_date}.
@@ -178,7 +240,7 @@ Siga ESTE fluxo, sem pular etapas.
 
 2.  **Fluxo de Agendamento (SÓ INICIE APÓS A IDENTIFICAÇÃO):**
     a. **Passo 1: Procedimento:** Primeiro, pergunte QUAL o procedimento desejado. (Ex: "Qual procedimento você gostaria de agendar?").
-    b. **Passo 2: Consultar Vagas:** APÓS saber o procedimento, use a ferramenta `consultar_horarios_disponiveis` SEM passar um dia. Ela te retornará a data mais próxima com vagas.
+    b. **Passo 2: Consultar Vagas:** APÓS saber o procedimento, use a ferramenta `consultar_horarios_disponiveis`. Ela te retornará a data mais próxima com vagas.
     c. **Passo 3: Oferecer Horários:** Apresente os horários encontrados ao paciente (Ex: "Perfeito. Encontrei vagas para o dia X. Os horários são Y e Z. Algum deles funciona para você?").
     d. **Passo 4: Confirmar:** Se o paciente escolher um horário, confirme o agendamento usando a ferramenta `agendar_consulta`. Se ele pedir outro dia, use a ferramenta `consultar_horarios_disponiveis` novamente, mas desta vez com o dia que ele pediu.
 
@@ -187,55 +249,31 @@ Responda SEMPRE em JSON, usando uma das actions abaixo.
 
 1.  **Para responder ao usuário:**
     ```json
-    {
-      "action": "responder",
-      "data": {
-        "texto": "Sua resposta aqui."
-      }
-    }
+    { "action": "responder", "data": { "texto": "Sua resposta aqui." } }
     ```
-2.  **Para consultar um paciente existente (PRIMEIRA AÇÃO DA CONVERSA):**
+2.  **Para consultar um paciente (PRIMEIRA AÇÃO DA CONVERSA):**
     ```json
-    {
-        "action": "consultar_paciente_por_telefone",
-        "data": null
-    }
+    { "action": "consultar_paciente_por_telefone", "data": null }
     ```
-3.  **Para cadastrar um novo paciente (use apenas quando tiver NOME e DATA DE NASCIMENTO):**
+3.  **Para cadastrar um novo paciente (só use quando tiver NOME e DATA DE NASCIMENTO):**
     ```json
-    {
-      "action": "cadastrar_paciente",
-      "data": {
-        "nome": "Nome Completo",
-        "data_nascimento": "DD/MM/AAAA"
-      }
-    }
+    { "action": "cadastrar_paciente", "data": { "nome": "Nome Completo", "data_nascimento": "DD/MM/AAAA" } }
     ```
 4.  **Para agendar uma consulta:**
     ```json
-    {
-      "action": "agendar_consulta",
-      "data": {
-        "procedimento": "Nome do Procedimento",
-        "data_hora": "AAAA-MM-DDTHH:MM:SS"
-      }
-    }
+    { "action": "agendar_consulta", "data": { "procedimento": "Nome do Procedimento", "data_hora": "AAAA-MM-DDTHH:MM:SS" } }
     ```
 5.  **Para verificar horários (se precisar de um dia específico, passe o parâmetro "dia"):**
     ```json
-    {
-      "action": "consultar_horarios_disponiveis",
-      "data": {
-        "dia": "AAAA-MM-DD" 
-      }
-    }
+    { "action": "consultar_horarios_disponiveis", "data": { "dia": "AAAA-MM-DD" } }
     ```
 """.replace("{current_date}", date.today().isoformat())
 
     messages = [{"role": "system", "content": prompt_sistema}]
-    # Se o histórico estiver vazio, a primeira ação é consultar o paciente
+    
     if not historico:
-        messages.append({"role": "user", "content": "Início da conversa."})
+        # Força a primeira ação a ser a consulta de paciente
+        messages.append({"role": "user", "content": "Início da conversa, verifique o cadastro do paciente."})
     else:
         messages.extend(historico)
         messages.append({"role": "user", "content": dados.mensagem})
@@ -247,10 +285,9 @@ Responda SEMPRE em JSON, usando uma das actions abaixo.
     
     # Roteador de Ações
     if action == "responder":
-        return {"reply": action_data.get("texto", "Ocorreu um erro.")}
+        return {"reply": action_data.get("texto")}
     
     elif action == "consultar_paciente_por_telefone":
-        # Ferramenta especial que re-chama a IA para ela poder se apresentar
         resultado_ferramenta = await consultar_paciente_por_telefone(dados.telefone_usuario)
         messages.append({"role": "assistant", "content": json.dumps(resposta_ia)})
         messages.append({"role": "tool", "content": resultado_ferramenta})
@@ -270,11 +307,82 @@ Responda SEMPRE em JSON, usando uma das actions abaixo.
         return {"reply": resposta_ferramenta}
     
     else:
-        return {"reply": "Ação desconhecida."}
+        return {"reply": "Não entendi a ação. Por favor, reformule."}
 
 @app.post("/whatsapp")
 async def receber_mensagem_zapi(request: Request):
-    # O código deste endpoint permanece o mesmo da versão anterior, pois a lógica
-    # principal foi centralizada no endpoint /chat.
-    # ... (código existente sem alterações)
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Payload JSON inválido.")
+
+    numero_contato = payload.get("phone")
+    if not numero_contato:
+        raise HTTPException(status_code=400, detail="O campo 'phone' é obrigatório.")
+
+    if payload.get("fromMe"):
+        # Lógica do modo manual...
+        return {"status": "ok", "message": "Modo manual ativado."}
+
+    texto_da_mensagem = payload.get("text", {}).get("message")
+    audio_url = payload.get("audio", {}).get("audioUrl")
+    conteudo_processar = None
+
+    if texto_da_mensagem:
+        conteudo_processar = texto_da_mensagem
+    elif audio_url:
+        audio_bytes = await baixar_audio_bytes(audio_url)
+        if audio_bytes:
+            conteudo_processar = await transcrever_audio(audio_bytes) or "[Erro na transcrição]"
+        else:
+            conteudo_processar = "[Erro no download do áudio]"
+
+    if not conteudo_processar:
+        return {"status": "ok", "message": "Ignorando mensagem sem conteúdo."}
+
+    try:
+        query_select = historico_conversas.select().where(historico_conversas.c.telefone == numero_contato)
+        resultado = await database.fetch_one(query_select)
+        historico_recuperado = []
+        if resultado:
+             if resultado["snoozed_until"] and resultado["snoozed_until"] > datetime.now(timezone.utc):
+                 return {"status": "ok", "message": "Conversa em modo manual."}
+             if datetime.now(timezone.utc) - resultado["last_updated_at"] < timedelta(hours=24):
+                 historico_recuperado = json.loads(resultado["historico"])
+        
+        async with httpx.AsyncClient() as client:
+            public_url = os.getenv("PUBLIC_URL")
+            resposta_chat = await client.post(
+                 f"{public_url.rstrip('/')}/chat",
+                 json={"telefone_usuario": numero_contato, "mensagem": conteudo_processar, "historico": historico_recuperado},
+                 timeout=120.0
+            )
+            resposta_chat.raise_for_status()
+            
+            dados = resposta_chat.json()
+            mensagem_resposta = dados.get("reply", "Não consegui gerar uma resposta.")
+
+            historico_atualizado = historico_recuperado + [
+                {"role": "user", "content": conteudo_processar},
+                {"role": "assistant", "content": mensagem_resposta}
+            ]
+            historico_str = json.dumps(historico_atualizado[-20:])
+            if resultado:
+                query_db = historico_conversas.update().where(historico_conversas.c.telefone == numero_contato).values(historico=historico_str, last_updated_at=func.now(), snoozed_until=None)
+            else:
+                query_db = historico_conversas.insert().values(telefone=numero_contato, historico=historico_str, last_updated_at=func.now(), snoozed_until=None)
+            await database.execute(query_db)
+
+            instance_id, token, client_token = os.getenv("INSTANCE_ID"), os.getenv("TOKEN"), os.getenv("CLIENT_TOKEN")
+            zapi_headers = {"Client-Token": client_token}
+            await client.post(
+                f"https://api.z-api.io/instances/{instance_id}/token/{token}/send-text",
+                json={"phone": numero_contato, "message": mensagem_resposta},
+                headers=zapi_headers, 
+                timeout=30.0
+            )
+    except Exception as e:
+        print(f"!!! Erro no Webhook /whatsapp: {e} !!!")
+
     return {"status": "ok"}
+
