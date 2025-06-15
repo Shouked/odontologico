@@ -80,36 +80,15 @@ class MensagemChat(BaseModel):
 # --- Funções de Negócio (Ferramentas da IA) ---
 
 async def consultar_paciente_por_telefone(telefone: str) -> str:
+    """Consulta se um paciente já existe no banco de dados usando o número de telefone."""
     query = pacientes.select().where(pacientes.c.telefone == telefone)
     paciente = await database.fetch_one(query)
     if paciente:
         return f"Paciente encontrado: {paciente['nome']}."
     return "Paciente não cadastrado."
 
-# **NOVO**: Ferramenta para consultar agendamentos do paciente
-async def consultar_agendamentos_paciente(telefone: str) -> str:
-    """Consulta os agendamentos futuros de um paciente."""
-    paciente_query = pacientes.select().where(pacientes.c.telefone == telefone)
-    paciente = await database.fetch_one(paciente_query)
-    if not paciente:
-        return "Para consultar seus agendamentos, primeiro preciso fazer seu cadastro. Qual seu nome completo?"
-
-    agendamentos_query = agendamentos.select().where(
-        agendamentos.c.paciente_id == paciente["id"],
-        agendamentos.c.data_hora >= datetime.now(timezone.utc)
-    )
-    lista_agendamentos = await database.fetch_all(agendamentos_query)
-
-    if not lista_agendamentos:
-        return f"{paciente['nome']}, você não possui agendamentos futuros conosco."
-    
-    resposta = f"{paciente['nome']}, aqui estão seus próximos agendamentos:\n"
-    for ag in lista_agendamentos:
-        resposta += f"- {ag['procedimento']} no dia {ag['data_hora'].strftime('%d/%m/%Y às %H:%M')}\n"
-    return resposta
-
 async def consultar_horarios_disponiveis(dia_preferencial_str: Optional[str] = None) -> str:
-    # Código corrigido e otimizado
+    """Verifica os horários disponíveis, buscando o próximo dia útil com vagas."""
     data_inicial = date.today()
     if dia_preferencial_str:
         try:
@@ -132,47 +111,125 @@ async def consultar_horarios_disponiveis(dia_preferencial_str: Optional[str] = N
         if horarios_disponiveis:
             return f"Encontrei horários para o dia {data_consulta.strftime('%d/%m/%Y')}. Os horários disponíveis são: {', '.join(horarios_disponiveis)}."
     
-    return "Não encontrei horários disponíveis nos próximos 30 dias."
+    return "Não encontrei horários disponíveis nos próximos 30 dias. Por favor, entre em contato com a clínica."
 
 async def agendar_consulta(telefone: str, data_hora_str: str, procedimento: str) -> str:
-    # Lógica de agendamento
-    return ""
+    """Agenda uma nova consulta para um paciente existente."""
+    paciente_query = pacientes.select().where(pacientes.c.telefone == telefone)
+    paciente = await database.fetch_one(paciente_query)
+    if not paciente:
+        return "Paciente não encontrado. Por favor, cadastre-se antes de agendar."
+
+    try:
+        data_hora = datetime.fromisoformat(data_hora_str).astimezone(timezone.utc)
+    except ValueError:
+        return "Formato de data e hora inválido. Use AAAA-MM-DDTHH:MM:SS."
+
+    novo_agendamento = {
+        "id": uuid.uuid4(),
+        "paciente_id": paciente["id"],
+        "data_hora": data_hora,
+        "procedimento": procedimento,
+        "status": "Agendado"
+    }
+    query = agendamentos.insert().values(**novo_agendamento)
+    await database.execute(query)
+    return f"Perfeito! Seu agendamento para {procedimento} no dia {data_hora.strftime('%d/%m/%Y às %H:%M')} foi confirmado. Aguardamos você!"
 
 async def cadastrar_paciente(telefone: str, nome: str, data_nascimento_str: Optional[str]) -> str:
-    # Lógica de cadastro
-    return ""
+    """Cadastra um novo paciente no banco de dados."""
+    existente = await database.fetch_one(pacientes.select().where(pacientes.c.telefone == telefone))
+    if existente:
+        return "Você já possui um cadastro conosco."
+
+    data_nascimento = None
+    if data_nascimento_str:
+        try:
+            data_nascimento = datetime.strptime(data_nascimento_str, "%d/%m/%Y").date()
+        except ValueError:
+            try:
+                data_nascimento = datetime.strptime(data_nascimento_str, "%Y-%m-%d").date()
+            except ValueError:
+                return "Formato de data de nascimento inválido. Peça para o usuário fornecer no formato DD/MM/AAAA."
+
+    novo_paciente = {
+        "id": uuid.uuid4(),
+        "nome": nome,
+        "telefone": telefone,
+        "data_nascimento": data_nascimento
+    }
+    query = pacientes.insert().values(**novo_paciente)
+    await database.execute(query)
+    return f"Ótimo, {nome.split(' ')[0]}! Seu cadastro foi realizado com sucesso. Agora já podemos agendar sua consulta. Qual procedimento você gostaria de fazer?"
 
 # --- Funções Auxiliares de IA e Mídia ---
+
 async def chamar_ia(messages: List[dict]) -> dict:
-    # ... (código existente)
-    return {}
+    """Função para chamar a API de chat e retornar a resposta como um dicionário."""
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+        "Content-Type": "application/json",
+        "Referer": os.getenv("PUBLIC_URL") or ""
+    }
+    body = {
+        "model": "openai/gpt-4o",
+        "messages": messages,
+        "response_format": {"type": "json_object"}
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(url, headers=headers, json=body)
+            response.raise_for_status()
+            data = response.json()
+            return json.loads(data["choices"][0]["message"]["content"])
+    except Exception as e:
+        print(f"Erro na IA: {e}")
+        return {"action": "responder", "data": {"texto": "Desculpe, ocorreu um erro de comunicação com a IA."}}
 
 async def transcrever_audio(audio_bytes: bytes) -> str | None:
-    # ... (código existente)
-    return ""
+    """Função para transcrever áudio usando a API da OpenAI."""
+    try:
+        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        audio_file = ("audio.ogg", audio_bytes, "audio/ogg")
+        transcription = await client.audio.transcriptions.create(model="whisper-1", file=audio_file)
+        return transcription.text
+    except Exception as e:
+        print(f"Erro na transcrição: {e}")
+        return None
 
 async def baixar_audio_bytes(url: str) -> bytes | None:
-    # ... (código existente)
-    return b""
+    """Função para baixar o conteúdo de um áudio a partir de uma URL."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            zapi_headers = {"Client-Token": os.getenv("CLIENT_TOKEN")}
+            resposta = await client.get(url, headers=zapi_headers)
+            resposta.raise_for_status()
+            return resposta.content
+    except Exception as e:
+        print(f"Erro ao baixar áudio: {e}")
+        return None
 
 # --- Endpoints da API ---
 
 @app.get("/")
 async def root():
+    """Endpoint GET para verificar se a API está no ar."""
     return {"message": "API do Consultório Odonto-Sorriso no ar!"}
 
 @app.head("/")
 async def head_root():
+    """Endpoint HEAD para checagem de status por serviços de monitoramento."""
     return Response(status_code=200)
 
 @app.post("/chat")
 async def chat(dados: MensagemChat):
     historico = dados.historico or []
 
-    # **PROMPT COMPLETAMENTE REESCRITO PARA MAIOR INTELIGÊNCIA**
     prompt_sistema = """
 ### Papel e Objetivo
-Você é a Sofia, a recepcionista virtual da clínica "Odonto-Sorriso". Sua missão é ser proativa, eficiente e seguir o fluxo de conversa à risca. A data de hoje é {current_date}.
+Você é a Sofia, a assistente virtual da clínica "Odonto-Sorriso". Sua missão é ser uma recepcionista eficiente, guiando o paciente de forma lógica e natural. A data de hoje é {current_date}.
 
 ### Informações da Clínica
 - **Procedimentos:** Limpeza, Clareamento Dental, Restauração, Tratamento de Canal.
@@ -183,7 +240,7 @@ Siga ESTE fluxo, sem pular etapas.
 
 1.  **Início da Conversa (Contexto Inicial):**
     a. No começo da conversa, você receberá o resultado da consulta de paciente via `tool`.
-    b. **Se o resultado for "Paciente encontrado: [Nome]":** Cumprimente-o pelo nome e pergunte como pode ajudar (Ex: "Olá, Iago! Bem-vindo(a) de volta. Como posso ajudar hoje?").
+    b. **Se o resultado for "Paciente encontrado: [Nome]":** Cumprimente-o pelo nome (Ex: "Olá, Iago! Bem-vindo(a) de volta. Como posso ajudar hoje?").
     c. **Se for "Paciente não cadastrado":** Cumprimente e inicie o cadastro (Ex: "Olá! Bem-vindo(a) à Odonto-Sorriso. Para começarmos, qual seu nome completo?").
 
 2.  **Fluxo de Agendamento (SÓ INICIE APÓS A IDENTIFICAÇÃO):**
@@ -193,18 +250,17 @@ Siga ESTE fluxo, sem pular etapas.
     d. **Passo 4: Confirmar:** Se o paciente escolher um horário, use `agendar_consulta`.
 
 ### Definição das Ferramentas (Actions)
-Responda SEMPRE em JSON.
+Responda SEMPRE em JSON, usando uma das actions abaixo.
 
 1.  **Para responder ao usuário:** `{"action": "responder", "data": {"texto": "Sua resposta aqui."}}`
-2.  **Para cadastrar um novo paciente:** `{"action": "cadastrar_paciente", "data": {"nome": "Nome Completo", "data_nascimento": "DD/MM/AAAA"}}`
-3.  **Para agendar uma consulta:** `{"action": "agendar_consulta", "data": {"procedimento": "Nome", "data_hora": "AAAA-MM-DDTHH:MM:SS"}}`
-4.  **Para verificar horários:** `{"action": "consultar_horarios_disponiveis", "data": {"dia": "AAAA-MM-DD"}}`
-5.  **NOVO - Para ver os próprios agendamentos:** `{"action": "consultar_agendamentos_paciente", "data": null}`
+2.  **Para consultar um paciente (PRIMEIRA AÇÃO DA CONVERSA):** `{"action": "consultar_paciente_por_telefone", "data": null}`
+3.  **Para cadastrar um novo paciente (só use quando tiver NOME e DATA DE NASCIMENTO):** `{"action": "cadastrar_paciente", "data": {"nome": "Nome Completo", "data_nascimento": "DD/MM/AAAA"}}`
+4.  **Para agendar uma consulta:** `{"action": "agendar_consulta", "data": {"procedimento": "Nome", "data_hora": "AAAA-MM-DDTHH:MM:SS"}}`
+5.  **Para verificar horários:** `{"action": "consultar_horarios_disponiveis", "data": {"dia": "AAAA-MM-DD"}}`
 """.replace("{current_date}", date.today().isoformat())
 
     messages = [{"role": "system", "content": prompt_sistema}]
     
-    # **LÓGICA DE INÍCIO CORRIGIDA E SIMPLIFICADA**
     if not historico:
         resultado_consulta = await consultar_paciente_por_telefone(dados.telefone_usuario)
         messages.append({"role": "user", "content": dados.mensagem})
@@ -214,29 +270,19 @@ Responda SEMPRE em JSON.
         messages.append({"role": "user", "content": dados.mensagem})
 
     resposta_ia = await chamar_ia(messages)
-
     action = resposta_ia.get("action")
     action_data = resposta_ia.get("data", {})
     
-    # Roteador de Ações
     if action == "responder":
         return {"reply": action_data.get("texto")}
-    
-    elif action == "consultar_agendamentos_paciente":
-        return {"reply": await consultar_agendamentos_paciente(dados.telefone_usuario)}
-    
     elif action == "cadastrar_paciente":
         return {"reply": await cadastrar_paciente(dados.telefone_usuario, action_data.get("nome"), action_data.get("data_nascimento"))}
-
     elif action == "agendar_consulta":
         return {"reply": await agendar_consulta(dados.telefone_usuario, action_data.get("data_hora"), action_data.get("procedimento"))}
-
     elif action == "consultar_horarios_disponiveis":
         return {"reply": await consultar_horarios_disponiveis(action_data.get("dia"))}
-    
     else:
         return {"reply": "Não entendi a ação. Por favor, reformule."}
-
 
 @app.post("/whatsapp")
 async def receber_mensagem_zapi(request: Request):
@@ -250,12 +296,15 @@ async def receber_mensagem_zapi(request: Request):
         raise HTTPException(status_code=400, detail="O campo 'phone' é obrigatório.")
 
     if payload.get("fromMe"):
-        # Lógica do modo manual...
+        select_query = historico_conversas.select().where(historico_conversas.c.telefone == numero_contato)
+        if await database.fetch_one(select_query):
+            update_query = historico_conversas.update().where(historico_conversas.c.telefone == numero_contato).values(snoozed_until=datetime.now(timezone.utc) + timedelta(minutes=30))
+            await database.execute(update_query)
         return {"status": "ok", "message": "Modo manual ativado."}
 
-    conteudo_processar = None
     texto_da_mensagem = payload.get("text", {}).get("message")
     audio_url = payload.get("audio", {}).get("audioUrl")
+    conteudo_processar = None
 
     if texto_da_mensagem:
         conteudo_processar = texto_da_mensagem
