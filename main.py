@@ -79,18 +79,14 @@ class MensagemChat(BaseModel):
 
 # --- Funções de Negócio (Ferramentas da IA) ---
 
-# **CORRIGIDO**: A função agora retorna a mensagem final para o usuário
 async def consultar_paciente_por_telefone(telefone: str) -> str:
-    """Consulta um paciente e retorna a mensagem de boas-vindas apropriada."""
     query = pacientes.select().where(pacientes.c.telefone == telefone)
     paciente = await database.fetch_one(query)
     if paciente:
-        nome_paciente = paciente['nome'].split(' ')[0]
-        return f"Olá, {nome_paciente}! Bem-vindo(a) de volta à Odonto-Sorriso. Como posso ajudar hoje?"
-    return "Olá! Bem-vindo(a) à Odonto-Sorriso. Para que eu possa te ajudar melhor, qual o seu nome completo, por favor?"
+        return f"Paciente encontrado: {paciente['nome']}."
+    return "Paciente não cadastrado."
 
 async def consultar_horarios_disponiveis(dia_preferencial_str: Optional[str] = None) -> str:
-    """Verifica os horários disponíveis, buscando o próximo dia útil com vagas."""
     data_inicial = date.today()
     if dia_preferencial_str:
         try:
@@ -116,7 +112,6 @@ async def consultar_horarios_disponiveis(dia_preferencial_str: Optional[str] = N
     return "Não encontrei horários disponíveis nos próximos 30 dias."
 
 async def agendar_consulta(telefone: str, data_hora_str: str, procedimento: str) -> str:
-    """Agenda uma nova consulta para um paciente existente."""
     paciente_query = pacientes.select().where(pacientes.c.telefone == telefone)
     paciente = await database.fetch_one(paciente_query)
     if not paciente:
@@ -139,7 +134,6 @@ async def agendar_consulta(telefone: str, data_hora_str: str, procedimento: str)
     return f"Perfeito! Seu agendamento para {procedimento} no dia {data_hora.strftime('%d/%m/%Y às %H:%M')} foi confirmado. Aguardamos você!"
 
 async def cadastrar_paciente(telefone: str, nome: str, data_nascimento_str: Optional[str]) -> str:
-    """Cadastra um novo paciente no banco de dados."""
     existente = await database.fetch_one(pacientes.select().where(pacientes.c.telefone == telefone))
     if existente:
         return "Você já possui um cadastro conosco."
@@ -190,12 +184,25 @@ async def chamar_ia(messages: List[dict]) -> dict:
         return {"action": "responder", "data": {"texto": "Desculpe, ocorreu um erro de comunicação com a IA."}}
 
 async def transcrever_audio(audio_bytes: bytes) -> str | None:
-    # Código de transcrição permanece o mesmo
-    return ""
+    try:
+        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        audio_file = ("audio.ogg", audio_bytes, "audio/ogg")
+        transcription = await client.audio.transcriptions.create(model="whisper-1", file=audio_file)
+        return transcription.text
+    except Exception as e:
+        print(f"Erro na transcrição: {e}")
+        return None
 
 async def baixar_audio_bytes(url: str) -> bytes | None:
-    # Código de download permanece o mesmo
-    return b""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            zapi_headers = {"Client-Token": os.getenv("CLIENT_TOKEN")}
+            resposta = await client.get(url, headers=zapi_headers)
+            resposta.raise_for_status()
+            return resposta.content
+    except Exception as e:
+        print(f"Erro ao baixar áudio: {e}")
+        return None
 
 # --- Endpoints da API ---
 
@@ -220,12 +227,12 @@ Você é a Sofia, a assistente virtual da clínica "Odonto-Sorriso". Sua missão
 - **Horário:** Segunda a Sexta, 09:00-12:00 e 13:00-18:00.
 
 ### Fluxo Obrigatório de Conversa
-Siga ESTE fluxo, sem pular etapas.
+Siga ESTE fluxo.
 
 1.  **Boas-vindas e Identificação:**
-    a. A conversa SEMPRE começa com você usando a ferramenta `consultar_paciente_por_telefone`.
-    b. **Se o paciente for encontrado (resultado da ferramenta):** Cumprimente-o pelo nome (Ex: "Olá, Iago! ...").
-    c. **Se não for encontrado:** Inicie o cadastro (Ex: "Olá! ... qual seu nome completo?").
+    a. No início da conversa, você receberá o resultado da consulta de paciente.
+    b. **Se o resultado for "Paciente encontrado: [Nome]":** Cumprimente-o pelo nome (Ex: "Olá, Iago! Bem-vindo(a) de volta.").
+    c. **Se o resultado for "Paciente não cadastrado":** Inicie o cadastro (Ex: "Olá! Para começarmos, qual seu nome completo?").
 
 2.  **Fluxo de Agendamento (SÓ INICIE APÓS A IDENTIFICAÇÃO):**
     a. **Passo 1: Procedimento:** Primeiro, pergunte QUAL o procedimento desejado.
@@ -235,50 +242,42 @@ Siga ESTE fluxo, sem pular etapas.
 
 ### Definição das Ferramentas (Actions)
 Responda SEMPRE em JSON, usando uma das actions abaixo.
-
 1.  **Para responder ao usuário:** `{"action": "responder", "data": {"texto": "Sua resposta aqui."}}`
-2.  **Para consultar um paciente (PRIMEIRA AÇÃO DA CONVERSA):** `{"action": "consultar_paciente_por_telefone", "data": null}`
-3.  **Para cadastrar um novo paciente (use apenas quando tiver NOME e DATA DE NASCIMENTO):** `{"action": "cadastrar_paciente", "data": {"nome": "Nome Completo", "data_nascimento": "DD/MM/AAAA"}}`
-4.  **Para agendar uma consulta:** `{"action": "agendar_consulta", "data": {"procedimento": "Nome", "data_hora": "AAAA-MM-DDTHH:MM:SS"}}`
-5.  **Para verificar horários:** `{"action": "consultar_horarios_disponiveis", "data": {"dia": "AAAA-MM-DD"}}`
+2.  **Para cadastrar um novo paciente (só use quando tiver NOME e DATA DE NASCIMENTO):** `{"action": "cadastrar_paciente", "data": {"nome": "Nome Completo", "data_nascimento": "DD/MM/AAAA"}}`
+3.  **Para agendar uma consulta:** `{"action": "agendar_consulta", "data": {"procedimento": "Nome", "data_hora": "AAAA-MM-DDTHH:MM:SS"}}`
+4.  **Para verificar horários:** `{"action": "consultar_horarios_disponiveis", "data": {"dia": "AAAA-MM-DD"}}`
 """.replace("{current_date}", date.today().isoformat())
 
     messages = [{"role": "system", "content": prompt_sistema}]
     
-    # **LÓGICA CORRIGIDA**: A primeira mensagem sempre dispara a consulta de paciente.
+    # **LÓGICA CORRIGIDA E SIMPLIFICADA**
     if not historico:
-        resultado_ferramenta = await consultar_paciente_por_telefone(dados.telefone_usuario)
-        # Adiciona o resultado da ferramenta para a IA formular a saudação correta
-        messages.append({"role": "user", "content": "Início da conversa."})
-        messages.append({"role": "tool", "name": "consultar_paciente_por_telefone", "content": resultado_ferramenta})
+        # Na primeira mensagem, consulta o status do paciente ANTES de chamar a IA
+        resultado_consulta = await consultar_paciente_por_telefone(dados.telefone_usuario)
+        # Fornece o resultado como contexto para a IA, junto com a mensagem do usuário
+        messages.append({"role": "user", "content": dados.mensagem})
+        messages.append({"role": "tool", "name": "consultar_paciente_por_telefone", "content": resultado_consulta})
     else:
+        # Para mensagens seguintes, continua a conversa normalmente
         messages.extend(historico)
         messages.append({"role": "user", "content": dados.mensagem})
 
+    # Chama a IA uma única vez com o contexto preparado
     resposta_ia = await chamar_ia(messages)
-
     action = resposta_ia.get("action")
     action_data = resposta_ia.get("data", {})
     
-    # Roteador de Ações Simplificado
+    # Roteador de Ações
     if action == "responder":
         return {"reply": action_data.get("texto")}
-    
     elif action == "cadastrar_paciente":
-        resposta_ferramenta = await cadastrar_paciente(dados.telefone_usuario, action_data.get("nome"), action_data.get("data_nascimento"))
-        return {"reply": resposta_ferramenta}
-
+        return {"reply": await cadastrar_paciente(dados.telefone_usuario, action_data.get("nome"), action_data.get("data_nascimento"))}
     elif action == "agendar_consulta":
-        resposta_ferramenta = await agendar_consulta(dados.telefone_usuario, action_data.get("data_hora"), action_data.get("procedimento"))
-        return {"reply": resposta_ferramenta}
-
+        return {"reply": await agendar_consulta(dados.telefone_usuario, action_data.get("data_hora"), action_data.get("procedimento"))}
     elif action == "consultar_horarios_disponiveis":
-        resposta_ferramenta = await consultar_horarios_disponiveis(action_data.get("dia"))
-        return {"reply": resposta_ferramenta}
-    
+        return {"reply": await consultar_horarios_disponiveis(action_data.get("dia"))}
     else:
-        # Caso a IA não retorne uma ação válida na primeira vez, ela tentará de novo com o histórico.
-        return {"reply": "Não entendi a ação, pode reformular?"}
+        return {"reply": "Não entendi a ação. Por favor, reformule."}
 
 
 @app.post("/whatsapp")
