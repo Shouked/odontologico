@@ -138,37 +138,24 @@ async def agendar_consulta(telefone: str, data_hora_str: str, procedimento: str)
     await database.execute(query)
     return f"Perfeito, {paciente['nome'].split(' ')[0]}! Seu agendamento para {procedimento} no dia {dt_obj_local.strftime('%d/%m/%Y às %H:%M')} foi confirmado."
 
-# <<< NOVO: Ferramenta para consultar agendamentos existentes do paciente >>>
 async def consultar_meus_agendamentos_por_telefone(telefone: str) -> str:
-    """
-    Busca no banco de dados os agendamentos futuros para um determinado paciente.
-    """
-    # Passo 1: Encontrar o ID do paciente a partir do telefone
     paciente_query = pacientes.select().where(pacientes.c.telefone == telefone)
     paciente = await database.fetch_one(paciente_query)
-    
     if not paciente:
         return "Não encontrei seu cadastro. Para que eu possa verificar seus agendamentos, você precisa estar cadastrado. Gostaria de se cadastrar?"
-
-    # Passo 2: Buscar agendamentos futuros e ativos para esse paciente
     agendamentos_query = agendamentos.select().where(
         (agendamentos.c.paciente_id == paciente["id"]) &
-        (agendamentos.c.data_hora >= func.now()) & # func.now() é ciente do fuso horário no PostgreSQL
+        (agendamentos.c.data_hora >= func.now()) &
         (agendamentos.c.status == 'Agendado')
-    ).order_by(agendamentos.c.data_hora) # Ordena do mais próximo para o mais distante
-
+    ).order_by(agendamentos.c.data_hora)
     agendamentos_futuros = await database.fetch_all(agendamentos_query)
-
     if not agendamentos_futuros:
         return f"Olá, {paciente['nome'].split(' ')[0]}! Verifiquei aqui e você não possui agendamentos futuros conosco."
-
-    # Passo 3: Formatar a resposta para o usuário
     lista_formatada = []
     for ag in agendamentos_futuros:
         data_hora_local = ag['data_hora'].astimezone(SAO_PAULO_TZ)
         item = f"- {ag['procedimento']} no dia {data_hora_local.strftime('%d/%m/%Y às %H:%M')}"
         lista_formatada.append(item)
-    
     resposta = f"Olá, {paciente['nome'].split(' ')[0]}! Encontrei os seguintes agendamentos no seu nome:\n" + "\n".join(lista_formatada)
     return resposta
 
@@ -177,10 +164,7 @@ async def consultar_meus_agendamentos_por_telefone(telefone: str) -> str:
 
 async def chamar_ia(messages: List[dict]) -> dict:
     url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}", "Content-Type": "application/json"}
     body = {"model": "openai/gpt-4o", "messages": messages, "response_format": {"type": "json_object"}}
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -217,7 +201,6 @@ async def baixar_audio_bytes(url: str) -> bytes | None:
 
 # --- Lógica Central do Chat (Refatorada) ---
 async def processar_chat_logic(dados: ChatRequest) -> str:
-    # <<< MUDANÇA: Adicionada a nova ferramenta ao prompt do sistema >>>
     prompt_sistema = """
 ### Papel e Objetivo
 Você é a Sofia, a recepcionista virtual da clínica "Odonto-Sorriso". Sua missão é ser proativa, eficiente e humana.
@@ -246,12 +229,9 @@ A data de hoje é {current_date}. O fuso horário de referência é 'America/Sao
         *dados.historico,
         {"role": "user", "content": dados.mensagem}
     ]
-
     resposta_ia = await chamar_ia(messages)
     action = resposta_ia.get("action")
     action_data = resposta_ia.get("data", {})
-
-    # <<< MUDANÇA: Adicionado o roteamento para a nova ação >>>
     try:
         if action == "responder":
             return action_data.get("texto", "Não consegui processar sua solicitação.")
@@ -282,14 +262,10 @@ async def head_root():
 
 @app.post("/whatsapp")
 async def receber_mensagem_zapi(request: Request):
-    try:
-        payload = await request.json()
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Payload JSON inválido.")
-
+    try: payload = await request.json()
+    except json.JSONDecodeError: raise HTTPException(status_code=400, detail="Payload JSON inválido.")
     numero_contato = payload.get("phone")
-    if not numero_contato:
-        return Response(status_code=200)
+    if not numero_contato: return Response(status_code=200)
 
     if payload.get("fromMe"):
         snooze_time = datetime.now(timezone.utc) + timedelta(minutes=30)
@@ -308,17 +284,14 @@ async def receber_mensagem_zapi(request: Request):
         audio_bytes = await baixar_audio_bytes(payload["audio"]["audioUrl"])
         conteudo_processar = (await transcrever_audio(audio_bytes) if audio_bytes else None) or "[Erro na transcrição/download do áudio]"
     
-    if not conteudo_processar:
-        return Response(status_code=200)
+    if not conteudo_processar: return Response(status_code=200)
 
     try:
         query_select = historico_conversas.select().where(historico_conversas.c.telefone == numero_contato)
         resultado_db = await database.fetch_one(query_select)
         historico_recuperado = []
-
         if resultado_db:
-            if resultado_db["snoozed_until"] and resultado_db["snoozed_until"] > datetime.now(timezone.utc):
-                return Response(status_code=200)
+            if resultado_db["snoozed_until"] and resultado_db["snoozed_until"] > datetime.now(timezone.utc): return Response(status_code=200)
             if datetime.now(timezone.utc) - resultado_db["last_updated_at"] < timedelta(hours=6):
                 historico_recuperado = json.loads(resultado_db["historico"])
         
@@ -339,20 +312,36 @@ async def receber_mensagem_zapi(request: Request):
         upsert_query = """
             INSERT INTO historico_conversas (telefone, historico, snoozed_until, last_updated_at)
             VALUES (:telefone, :historico, NULL, NOW())
-            ON CONFLICT (telefone) DO UPDATE 
-            SET historico = :historico, snoozed_until = NULL, last_updated_at = NOW();
+            ON CONFLICT (telefone) DO UPDATE SET historico = :historico, snoozed_until = NULL, last_updated_at = NOW();
         """
         await database.execute(upsert_query, values={"telefone": numero_contato, "historico": historico_str})
 
+        # <<< MUDANÇA: Correção do problema de acentuação (Encoding) >>>
+        # Vamos enviar a requisição para a Z-API de forma explícita com encoding UTF-8
+
         instance_id, token, client_token = os.getenv("INSTANCE_ID"), os.getenv("TOKEN"), os.getenv("CLIENT_TOKEN")
         zapi_url = f"https://api.z-api.io/instances/{instance_id}/token/{token}/send-text"
+        
+        # 1. Criar o payload como um dicionário Python
+        payload_zapi = {"phone": numero_contato, "message": mensagem_resposta}
+        
+        # 2. Serializar o dicionário para uma string JSON e depois codificar em bytes UTF-8
+        encoded_payload = json.dumps(payload_zapi).encode('utf-8')
+        
+        # 3. Montar os headers, especificando o Content-Type com o charset UTF-8
+        zapi_headers = {
+            "Client-Token": client_token,
+            "Content-Type": "application/json; charset=utf-8"
+        }
+
         async with httpx.AsyncClient() as client:
             await client.post(
                 zapi_url,
-                json={"phone": numero_contato, "message": mensagem_resposta},
-                headers={"Client-Token": client_token}, 
+                content=encoded_payload, # Usar 'content' para enviar os bytes
+                headers=zapi_headers,    # Enviar os headers explícitos
                 timeout=30.0
             )
+            
     except Exception as e:
         print(f"!!! Erro Crítico no Webhook /whatsapp para {numero_contato}: {e} !!!")
     
